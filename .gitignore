@@ -1,0 +1,16 @@
+# Environment variables and secrets
+app/.env
+.env.*
+!.env.example
+
+# Python virtual environment
+venv/
+fastapienv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+#PyCharm
+.idea/
+#Attendance Uploads
+app/uploads/
