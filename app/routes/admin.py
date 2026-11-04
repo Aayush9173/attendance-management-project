@@ -25,10 +25,10 @@ async def create_employee(db : db_dependency,user : user_dependency,employee_dat
     if user.get("UserRole", "").casefold() != "admin":
         raise HTTPException(status_code=403,detail="Forbidden")
 
-    employee_exists= db.query(User).filter(User.employee_code == employee_data.employee_code).first()
+    existing_user = db.query(User).filter(func.lower(User.user_name) == employee_data.user_name.lower()).first()
 
-    if employee_exists:
-        raise HTTPException(status_code=400,detail="Employee already exists")
+    if existing_user:
+        raise HTTPException(status_code=400,detail="Username already in use!")
 
 
     new_employee = User(

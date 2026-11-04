@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from fastapi import Depends, HTTPException, APIRouter
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import jwt, JWTError
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from starlette import status
 from app.schemas import TokenRequestModel
@@ -29,7 +30,7 @@ ALGORITHM = os.getenv("ALGORITHM")
 db_dependency = Annotated[Session,Depends(get_db)]
 
 def authenticate_user(password: str, username: str,db):
-    user = db.query(User).filter(User.user_name == username).first()
+    user = db.query(User).filter(func.lower(User.user_name) == username.lower()).first()
     if not user:
         return False
     if not crypt_context.verify(password, user.hashed_password):
