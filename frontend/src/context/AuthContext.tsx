@@ -1,7 +1,8 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import type { AuthUser } from '../types';
 import { authApi, type LoginCredentials } from '../api/auth';
-import { extractAuthUser, isTokenExpired } from '../utils/jwt';
+import { setAccessToken, waitForInFlightRefresh } from '../api/client';
+import { extractAuthUser } from '../utils/jwt';
 
 interface AuthContextType {
   user: AuthUser | null;
@@ -9,7 +10,7 @@ interface AuthContextType {
   isAuthenticated: boolean;
   isLoading: boolean;
   login: (credentials: LoginCredentials) => Promise<AuthUser>;
-  logout: () => void;
+  logout: () => void | Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -19,44 +20,105 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [user, setUser] = useState<AuthUser | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
 
-  const logout = useCallback(() => {
-    localStorage.removeItem('attendance_token');
+  const logout = useCallback(async () => {
+    // 1. Immediately invalidate frontend state & session generation
+    setAccessToken(null);
     setToken(null);
     setUser(null);
+
+    try {
+      // 2. Wait for any in-flight refresh to settle so the browser holds the rotated cookie
+      await waitForInFlightRefresh();
+      // 3. Revoke current session on backend using the rotated cookie
+      await authApi.logout();
+    } catch (err) {
+      console.warn('Backend logout encountered an error:', err);
+    } finally {
+      // 4. Guarantee state remains cleared even if network fails
+      setAccessToken(null);
+      setToken(null);
+      setUser(null);
+    }
   }, []);
 
-  // Initialize from localStorage
+  // Restore session from HttpOnly refresh cookie on application startup
   useEffect(() => {
-    const storedToken = localStorage.getItem('attendance_token');
-    if (storedToken) {
-      if (isTokenExpired(storedToken)) {
-        logout();
-      } else {
-        const authUser = extractAuthUser(storedToken);
+    let isMounted = true;
+
+    const restoreSession = async () => {
+      try {
+        const tokenResponse = await authApi.refresh();
+        if (!isMounted) return;
+
+        const newAccessToken = tokenResponse.access_token;
+        const authUser = extractAuthUser(newAccessToken);
+
         if (authUser) {
-          setToken(storedToken);
+          setAccessToken(newAccessToken);
+          setToken(newAccessToken);
           setUser(authUser);
         } else {
-          logout();
+          setAccessToken(null);
+          setToken(null);
+          setUser(null);
+        }
+      } catch {
+        if (isMounted) {
+          setAccessToken(null);
+          setToken(null);
+          setUser(null);
+        }
+      } finally {
+        if (isMounted) {
+          setIsLoading(false);
         }
       }
-    }
-    setIsLoading(false);
-  }, [logout]);
+    };
 
-  // Listen for 401 events from api client
+    restoreSession();
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  // Listen for auth events from api client (background refresh and session expiry)
   useEffect(() => {
     const handleUnauthorized = () => {
-      logout();
+      setAccessToken(null);
+      setToken(null);
+      setUser(null);
+    };
+
+    const handleTokenRefreshed = (event: Event) => {
+      const customEvent = event as CustomEvent<{ token: string }>;
+      const newToken = customEvent.detail?.token;
+      if (newToken) {
+        const authUser = extractAuthUser(newToken);
+        if (authUser) {
+          setToken(newToken);
+          setUser(authUser);
+        }
+      }
     };
 
     window.addEventListener('auth:unauthorized', handleUnauthorized);
+    window.addEventListener('auth:token-refreshed', handleTokenRefreshed);
+
     return () => {
       window.removeEventListener('auth:unauthorized', handleUnauthorized);
+      window.removeEventListener('auth:token-refreshed', handleTokenRefreshed);
     };
-  }, [logout]);
+  }, []);
 
   const login = async (credentials: LoginCredentials): Promise<AuthUser> => {
+    // 1. Invalidate old session generation immediately
+    setAccessToken(null);
+
+    // 2. Wait for any in-flight refresh to settle before sending login request
+    await waitForInFlightRefresh();
+
+    // 3. Send login request with clean state
     const tokenResponse = await authApi.login(credentials);
     const newAccessToken = tokenResponse.access_token;
 
@@ -65,7 +127,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       throw new Error('Failed to parse authentication credentials from server token');
     }
 
-    localStorage.setItem('attendance_token', newAccessToken);
+    // 4. Store new access token in memory and React state
+    setAccessToken(newAccessToken);
     setToken(newAccessToken);
     setUser(authUser);
 

@@ -1,8 +1,12 @@
+import hashlib
+import secrets
+from asyncio.windows_events import NULL
 from datetime import datetime,timezone,timedelta
 import os
+from http import cookies
 from typing import Annotated
 from dotenv import load_dotenv
-from fastapi import Depends, HTTPException, APIRouter
+from fastapi import Depends, HTTPException, APIRouter, Cookie, Response
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import jwt, JWTError
 from sqlalchemy import func
@@ -11,8 +15,8 @@ from starlette import status
 from app.schemas import TokenRequestModel
 from app.dependencies import get_db
 from app.dependencies import crypt_context
-
-from app.model import User
+from app.dependencies import clear_refresh_cookie
+from app.model import User, UserSession
 
 router = APIRouter(
     tags=["auth"],
@@ -62,7 +66,7 @@ oauth_bearer = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
 
 @router.post("/login")
-async def login_for_access_token(db: db_dependency,form_data: OAuth2PasswordRequestForm = Depends()):
+async def login_for_access_token(response: Response,db: db_dependency,form_data: OAuth2PasswordRequestForm = Depends()):
     user = authenticate_user(form_data.password, form_data.username,db)
     if not user:
         raise HTTPException(
@@ -73,7 +77,129 @@ async def login_for_access_token(db: db_dependency,form_data: OAuth2PasswordRequ
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Inactive user"
         )
-    token = create_token(user.user_name, user.id, user.role, timedelta(minutes=20))
+
+    token = create_token(user.user_name, user.id, user.role, timedelta(seconds=20))
+
+    raw_refresh_token = secrets.token_urlsafe(64)
+    refresh_token_hash = hashlib.sha256(raw_refresh_token.encode("utf-8")).hexdigest()
+
+    time_now = datetime.now(timezone.utc)
+    expires_at= time_now + timedelta(days=7)
+    absolute_expires_at = time_now+timedelta(days=30)
+
+    user_session = UserSession(
+        user_id=user.id,
+        token_hash=refresh_token_hash,
+        created_at=time_now,
+        expires_at=expires_at,
+        absolute_expires_at=absolute_expires_at,
+        revoked_at=None
+    )
+
+    db.add(user_session)
+    db.commit()
+
+    response.set_cookie(
+        key="refresh_token",
+        value=raw_refresh_token,
+        httponly=True,
+        secure=False,
+        samesite="lax",
+        path="/auth",
+        max_age=7*24*60*60
+    )
     return TokenRequestModel(
         access_token = token,
         token_type = "Bearer")
+
+@router.post("/refresh")
+async def refresh_token(response: Response,db: Session = Depends(get_db), refresh_token: Annotated[str|None,Cookie()]=None):
+
+    if refresh_token is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+
+    received_token_hash= hashlib.sha256(refresh_token.encode("utf-8")).hexdigest()
+
+    token_exists = db.query(UserSession).filter(UserSession.token_hash == received_token_hash).first()
+
+    if not token_exists:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+
+    time_now = datetime.now(timezone.utc)
+
+    if time_now >= token_exists.expires_at:
+        clear_refresh_cookie(response)
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+    if time_now >= token_exists.absolute_expires_at:
+        clear_refresh_cookie(response)
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+    if token_exists.revoked_at is not None:
+        clear_refresh_cookie(response)
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+
+    user = db.query(User).filter(User.id == token_exists.user_id).first()
+
+    if user is None or not user.is_active:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+
+    new_refresh_token = secrets.token_urlsafe(64)
+
+    new_token_hash = hashlib.sha256(new_refresh_token.encode("utf-8")).hexdigest()
+
+    new_expires_at = min(time_now + timedelta(days=7),token_exists.absolute_expires_at)
+
+
+    rows_updated = db.query(UserSession).filter(UserSession.id == token_exists.id,
+                                                UserSession.token_hash == received_token_hash,
+                                                UserSession.expires_at >= time_now,
+                                                UserSession.absolute_expires_at>=time_now,
+                                                UserSession.revoked_at.is_(None)).update({
+        UserSession.token_hash:new_token_hash,
+        UserSession.expires_at:new_expires_at,
+    },synchronize_session=False)
+
+    if rows_updated == 0:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired session"
+        )
+
+    db.commit()
+
+    new_access_token = create_token(user.user_name,user.id,user.role,timedelta(seconds=20))
+
+    response.set_cookie(
+        key="refresh_token",
+        value=new_refresh_token,
+        httponly=True,
+        secure=False,
+        samesite="lax",
+        path="/auth",
+        max_age=7 * 24 * 60 * 60
+    )
+
+    return TokenRequestModel(
+        access_token=new_access_token,
+        token_type="Bearer"
+    )
+
+@router.post("/logout")
+async def logout(response: Response, refresh_token: Annotated[str|None,Cookie()]=None,db: Session = Depends(get_db)):
+    if refresh_token is not None:
+
+        token_hash = hashlib.sha256(
+            refresh_token.encode("utf-8")
+        ).hexdigest()
+
+        token_exist = db.query(UserSession).filter(
+            UserSession.token_hash == token_hash
+        ).first()
+
+        if token_exist and token_exist.revoked_at is None:
+            token_exist.revoked_at = datetime.now(timezone.utc)
+            db.commit()
+
+    clear_refresh_cookie(response)
+
+    return {"message": "Successfully logged out"}

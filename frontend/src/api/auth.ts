@@ -1,4 +1,4 @@
-import { apiClient } from './client';
+import { apiClient, refreshAccessToken } from './client';
 import type { AuthToken } from '../types';
 
 export interface LoginCredentials {
@@ -18,6 +18,20 @@ export const authApi = {
         'Content-Type': 'application/x-www-form-urlencoded',
       },
       body: formData.toString(),
+    });
+  },
+
+  async refresh(): Promise<AuthToken> {
+    const token = await refreshAccessToken();
+    return {
+      access_token: token,
+      token_type: 'Bearer',
+    };
+  },
+
+  async logout(): Promise<{ message: string }> {
+    return apiClient<{ message: string }>('/auth/logout', {
+      method: 'POST',
     });
   },
 };

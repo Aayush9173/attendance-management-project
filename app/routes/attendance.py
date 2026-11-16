@@ -3,7 +3,8 @@ from typing import Annotated
 from uuid import uuid4
 
 from sqlalchemy import func
-
+from io import BytesIO
+from PIL import Image, UnidentifiedImageError
 from app.schemas import CheckoutPatchRequestModel
 from fastapi import APIRouter, Depends, UploadFile, HTTPException, Form
 from pathlib import Path
@@ -19,6 +20,9 @@ router = APIRouter(
 
 db_dependency = Annotated[Session,Depends(get_db)]
 user_dependency = Annotated[dict,Depends(verify_token)]
+
+MAX_IMAGE_SIZE = 5 * 1024 * 1024
+
 
 def calculate_distance_meters(
     lat1: float,
@@ -129,9 +133,7 @@ def serialize_attendance_record(att: Attendance, user_map: dict[int, User]) -> d
         "id": att.id,
         "mark_date": att.mark_date,
         "check_in": att.check_in,
-        "check_in_photo": att.check_in_photo,
         "check_out": att.check_out,
-        "check_out_photo": att.check_out_photo,
         "employee_id": att.employee_id,
         "employee_name": emp_name,
         "employee_code": emp_code,
@@ -142,6 +144,34 @@ def serialize_attendance_record(att: Attendance, user_map: dict[int, User]) -> d
 
 
 
+async def validate_attendance_photo(image: UploadFile):
+
+    contents = await image.read(MAX_IMAGE_SIZE + 1)
+
+    if len(contents) > MAX_IMAGE_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail="Image size cannot exceed 5 MB"
+        )
+
+    try:
+        with Image.open(BytesIO(contents)) as photo:
+            if photo.format != "JPEG":
+                raise HTTPException(
+                    status_code=400,
+                    detail="Only JPEG images are accepted"
+                )
+
+            photo.verify()
+
+    except (UnidentifiedImageError, OSError):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid image file"
+        )
+
+    finally:
+        await image.close()
 
 @router.post("/check_in")
 async def attendance_check_in(image: UploadFile,db : db_dependency,user : user_dependency,
@@ -160,28 +190,11 @@ async def attendance_check_in(image: UploadFile,db : db_dependency,user : user_d
 
     validate_employee_location(db,latitude,longitude,accuracy)
 
-    if not image.content_type or not image.content_type.startswith("image/"):
-        raise HTTPException(
-            status_code=400,
-            detail="Uploaded file must be an image"
-        )
-
-    upload_dir = Path("uploads/attendance")
-    upload_dir.mkdir(parents=True, exist_ok=True)
-
-    extension = Path(image.filename).suffix
-    filename = f"{uuid4()}{extension}"
-
-    file_path = upload_dir / filename
-    contents = await image.read()
-
-    with open(file_path, "wb") as file:
-        file.write(contents)
+    await validate_attendance_photo(image)
 
     attendance = Attendance(
         mark_date = today,
         check_in = datetime.now(),
-        check_in_photo = str(file_path),
         employee_id = user.get("UserId")
     )
 
@@ -218,28 +231,10 @@ async def attendance_check_out(image: UploadFile,db : db_dependency,user : user_
 
     validate_employee_location(db,latitude,longitude,accuracy)
 
-    if not image.content_type or not image.content_type.startswith("image/"):
-        raise HTTPException(
-            status_code=400,
-            detail="Uploaded file must be an image"
-        )
-
-    upload_dir = Path("uploads/attendance")
-    upload_dir.mkdir(parents=True, exist_ok=True)
-
-    extension = Path(image.filename).suffix
-    filename = f"{uuid4()}{extension}"
-
-    file_path = upload_dir / filename
-    contents = await image.read()
-
-    with open(file_path, "wb") as file:
-        file.write(contents)
+    await validate_attendance_photo(image)
 
     existing_attendance.check_out = datetime.now()
     existing_attendance.employee_id = user.get("UserId")
-    existing_attendance.check_out_photo = str(file_path)
-
 
     db.commit()
 

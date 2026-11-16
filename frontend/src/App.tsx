@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import type { AuthUser } from './types';
 import { LoginPage } from './pages/LoginPage';
 import { Navbar } from './components/Navbar';
 import { EmployeeDashboard } from './pages/employee/EmployeeDashboard';
@@ -28,25 +29,236 @@ const EMPLOYEE_TABS = [
   'employee-history',
 ];
 
+interface ParsedRoute {
+  tab: string;
+  employeeCode: string | null;
+  originTab: string;
+}
+
+interface HistoryState {
+  tab: string;
+  employeeCode: string | null;
+  originTab: string;
+  fromInternalNav: boolean;
+  sessionId: string;
+}
+
+function parseHash(hash: string): ParsedRoute {
+  const clean = hash.replace(/^#\/?/, '');
+  if (!clean) {
+    return { tab: '', employeeCode: null, originTab: 'admin-employees' };
+  }
+  const [path, queryString] = clean.split('?');
+  const params = new URLSearchParams(queryString || '');
+  return {
+    tab: path,
+    employeeCode: params.get('code') || null,
+    originTab: params.get('origin') || 'admin-employees',
+  };
+}
+
+function buildHash(tab: string, employeeCode?: string | null, originTab?: string): string {
+  if (tab === 'admin-employee-profile' && employeeCode) {
+    const params = new URLSearchParams();
+    params.set('code', employeeCode);
+    if (originTab) params.set('origin', originTab);
+    return `#/admin-employee-profile?${params.toString()}`;
+  }
+  return `#/${tab}`;
+}
+
+function resolveAuthorizedRoute(
+  parsed: ParsedRoute,
+  userRole: 'admin' | 'employee'
+): ParsedRoute {
+  const isAdmin = userRole === 'admin';
+  const allowedTabs = isAdmin ? ADMIN_TABS : EMPLOYEE_TABS;
+  const defaultTab = isAdmin ? 'admin-dashboard' : 'employee-dashboard';
+
+  let targetTab = allowedTabs.includes(parsed.tab) ? parsed.tab : defaultTab;
+  let code = parsed.employeeCode;
+  let origin = isAdmin && ADMIN_TABS.includes(parsed.originTab) ? parsed.originTab : 'admin-employees';
+
+  // Admin profile requires admin role AND a valid employee code
+  if (targetTab === 'admin-employee-profile') {
+    if (!isAdmin || !code || !code.trim()) {
+      targetTab = origin;
+      code = null;
+    }
+  } else {
+    code = null;
+  }
+
+  return { tab: targetTab, employeeCode: code, originTab: origin };
+}
+
 const MainLayout: React.FC = () => {
   const { user, isAuthenticated, isLoading } = useAuth();
   const [activeTab, setActiveTab] = useState<string>('');
   const [viewingEmployeeCode, setViewingEmployeeCode] = useState<string | null>(null);
   const [profileOriginTab, setProfileOriginTab] = useState<string>('admin-employees');
 
-  // Requirement 5: Automatically reset tab to default when user logs in, logs out, or switches role
+  const currentSessionIdRef = useRef<string>('');
+  const prevUserRef = useRef<AuthUser | null>(null);
+  const isInitializedRef = useRef<boolean>(false);
+
+  // Authentication initialization, session ID management, and route restoration
   useEffect(() => {
-    if (user) {
-      const defaultTab = user.role === 'admin' ? 'admin-dashboard' : 'employee-dashboard';
-      setActiveTab(defaultTab);
-      setViewingEmployeeCode(null);
-      setProfileOriginTab('admin-employees');
-    } else {
+    // While authentication is restoring, do not touch routes or state
+    if (isLoading) {
+      return;
+    }
+
+    // Unauthenticated state
+    if (!user || !isAuthenticated) {
+      currentSessionIdRef.current = '';
+      isInitializedRef.current = false;
+      prevUserRef.current = null;
       setActiveTab('');
       setViewingEmployeeCode(null);
       setProfileOriginTab('admin-employees');
+
+      // Strip any protected hash on logout / unauthenticated view
+      if (window.location.hash) {
+        window.history.replaceState(null, '', window.location.pathname);
+      }
+      return;
     }
-  }, [user]);
+
+    // Authenticated state
+    const prevUser = prevUserRef.current;
+    prevUserRef.current = user;
+
+    const existingSessionId = window.history.state?.sessionId;
+    const isSameUserReload =
+      existingSessionId &&
+      typeof existingSessionId === 'string' &&
+      existingSessionId.startsWith(`${user.id}_`);
+
+    if (!isInitializedRef.current) {
+      isInitializedRef.current = true;
+
+      if (isSameUserReload) {
+        // Page reload (F5) within the same authenticated session
+        currentSessionIdRef.current = existingSessionId;
+
+        const parsed = parseHash(window.location.hash);
+        const authorized = resolveAuthorizedRoute(parsed, user.role);
+
+        // Normalize state on reload: fromInternalNav is false so UI Back uses fallback
+        const nextState: HistoryState = {
+          tab: authorized.tab,
+          employeeCode: authorized.employeeCode,
+          originTab: authorized.originTab,
+          fromInternalNav: false,
+          sessionId: currentSessionIdRef.current,
+        };
+        window.history.replaceState(
+          nextState,
+          '',
+          buildHash(authorized.tab, authorized.employeeCode, authorized.originTab)
+        );
+
+        setActiveTab(authorized.tab);
+        setViewingEmployeeCode(authorized.employeeCode);
+        setProfileOriginTab(authorized.originTab);
+      } else {
+        // Brand-new login or user switch
+        const newSessionId = `${user.id}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+        currentSessionIdRef.current = newSessionId;
+
+        const defaultTab = user.role === 'admin' ? 'admin-dashboard' : 'employee-dashboard';
+        const nextState: HistoryState = {
+          tab: defaultTab,
+          employeeCode: null,
+          originTab: 'admin-employees',
+          fromInternalNav: false,
+          sessionId: newSessionId,
+        };
+        window.history.replaceState(nextState, '', buildHash(defaultTab));
+
+        setActiveTab(defaultTab);
+        setViewingEmployeeCode(null);
+        setProfileOriginTab('admin-employees');
+      }
+    } else if (prevUser && prevUser.id !== user.id) {
+      // User switched without full reload
+      const newSessionId = `${user.id}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      currentSessionIdRef.current = newSessionId;
+
+      const defaultTab = user.role === 'admin' ? 'admin-dashboard' : 'employee-dashboard';
+      const nextState: HistoryState = {
+        tab: defaultTab,
+        employeeCode: null,
+        originTab: 'admin-employees',
+        fromInternalNav: false,
+        sessionId: newSessionId,
+      };
+      window.history.replaceState(nextState, '', buildHash(defaultTab));
+
+      setActiveTab(defaultTab);
+      setViewingEmployeeCode(null);
+      setProfileOriginTab('admin-employees');
+    }
+  }, [user, isAuthenticated, isLoading]);
+
+  // Browser Back/Forward navigation listener
+  useEffect(() => {
+    const handlePopState = (event: PopStateEvent) => {
+      // Unauthenticated: ensure protected routes are not accessible
+      if (!user || !isAuthenticated) {
+        if (window.location.hash) {
+          window.history.replaceState(null, '', window.location.pathname);
+        }
+        return;
+      }
+
+      // Check session identifier
+      const stateSessionId = event.state?.sessionId;
+      const defaultTab = user.role === 'admin' ? 'admin-dashboard' : 'employee-dashboard';
+
+      // Reject stale history entries from previous sessions or unauthenticated entries
+      if (!stateSessionId || stateSessionId !== currentSessionIdRef.current) {
+        const nextState: HistoryState = {
+          tab: defaultTab,
+          employeeCode: null,
+          originTab: 'admin-employees',
+          fromInternalNav: false,
+          sessionId: currentSessionIdRef.current,
+        };
+        window.history.replaceState(nextState, '', buildHash(defaultTab));
+
+        setActiveTab(defaultTab);
+        setViewingEmployeeCode(null);
+        setProfileOriginTab('admin-employees');
+        return;
+      }
+
+      // Parse hash (never blindly trust event.state route data)
+      const parsed = parseHash(window.location.hash);
+      const authorized = resolveAuthorizedRoute(parsed, user.role);
+
+      // If the URL was modified or unauthorized, sanitize it
+      const targetHash = buildHash(authorized.tab, authorized.employeeCode, authorized.originTab);
+      if (window.location.hash !== targetHash) {
+        const nextState: HistoryState = {
+          tab: authorized.tab,
+          employeeCode: authorized.employeeCode,
+          originTab: authorized.originTab,
+          fromInternalNav: !!event.state?.fromInternalNav,
+          sessionId: currentSessionIdRef.current,
+        };
+        window.history.replaceState(nextState, '', targetHash);
+      }
+
+      setActiveTab(authorized.tab);
+      setViewingEmployeeCode(authorized.employeeCode);
+      setProfileOriginTab(authorized.originTab);
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [user, isAuthenticated]);
 
   if (isLoading) {
     return (
@@ -68,16 +280,61 @@ const MainLayout: React.FC = () => {
   // Fallback to role-specific default tab if current selection is invalid or empty
   const currentTab = allowedTabs.includes(activeTab) ? activeTab : defaultTab;
 
-  // Handler to open an employee's profile from attendance logs or user management (Requirement 3)
+  const handleTabChange = (tab: string, options?: { replace?: boolean }) => {
+    const validTab = allowedTabs.includes(tab) ? tab : defaultTab;
+
+    // Prevent pushing duplicate history entries when clicking current active tab
+    if (!options?.replace && validTab === currentTab && !viewingEmployeeCode) {
+      return;
+    }
+
+    const hash = buildHash(validTab);
+    const nextState: HistoryState = {
+      tab: validTab,
+      employeeCode: null,
+      originTab: profileOriginTab,
+      fromInternalNav: true,
+      sessionId: currentSessionIdRef.current,
+    };
+
+    if (options?.replace) {
+      window.history.replaceState(nextState, '', hash);
+    } else {
+      window.history.pushState(nextState, '', hash);
+    }
+
+    setViewingEmployeeCode(null);
+    setActiveTab(validTab);
+  };
+
   const handleViewEmployee = (employeeCode: string, originTab: string = 'admin-employees') => {
+    if (!isAdmin) return;
+
+    const validOrigin = ADMIN_TABS.includes(originTab) ? originTab : 'admin-employees';
+    const hash = buildHash('admin-employee-profile', employeeCode, validOrigin);
+    const nextState: HistoryState = {
+      tab: 'admin-employee-profile',
+      employeeCode,
+      originTab: validOrigin,
+      fromInternalNav: true,
+      sessionId: currentSessionIdRef.current,
+    };
+
+    window.history.pushState(nextState, '', hash);
+
     setViewingEmployeeCode(employeeCode);
-    setProfileOriginTab(originTab);
+    setProfileOriginTab(validOrigin);
     setActiveTab('admin-employee-profile');
   };
 
-  const handleTabChange = (tab: string) => {
-    setViewingEmployeeCode(null);
-    setActiveTab(tab);
+  const handleProfileBack = (targetTab?: string) => {
+    const isFromInternalNav = window.history.state?.fromInternalNav === true;
+    if (isFromInternalNav) {
+      window.history.back();
+    } else {
+      const fallbackTab = targetTab || profileOriginTab || 'admin-employees';
+      handleTabChange(fallbackTab, { replace: true });
+    }
   };
 
   return (
@@ -89,7 +346,7 @@ const MainLayout: React.FC = () => {
             ? profileOriginTab || 'admin-employees'
             : currentTab
         }
-        onTabChange={handleTabChange}
+        onTabChange={(tab) => handleTabChange(tab)}
       />
 
       {/* Main Content Area */}
@@ -98,7 +355,7 @@ const MainLayout: React.FC = () => {
         {!isAdmin && (
           <>
             {currentTab === 'employee-dashboard' && (
-              <EmployeeDashboard onNavigateHistory={() => setActiveTab('employee-history')} />
+              <EmployeeDashboard onNavigateHistory={() => handleTabChange('employee-history')} />
             )}
             {currentTab === 'employee-history' && <MyAttendancePage />}
           </>
@@ -107,14 +364,14 @@ const MainLayout: React.FC = () => {
         {/* Admin Views */}
         {isAdmin && (
           <>
-            {currentTab === 'admin-dashboard' && <AdminDashboard onNavigate={handleTabChange} />}
+            {currentTab === 'admin-dashboard' && <AdminDashboard onNavigate={(tab) => handleTabChange(tab)} />}
             {currentTab === 'admin-attendance' && (
               <AdminAttendancePage onViewEmployee={(code) => handleViewEmployee(code, 'admin-attendance')} />
             )}
             {currentTab === 'admin-employees' && (
               <AdminEmployeesPage
                 onViewEmployee={(code) => handleViewEmployee(code, 'admin-employees')}
-                onNavigateToAttendance={() => setActiveTab('admin-attendance')}
+                onNavigateToAttendance={() => handleTabChange('admin-attendance')}
               />
             )}
             {currentTab === 'admin-schedule' && <AdminSchedulePage />}
@@ -124,10 +381,7 @@ const MainLayout: React.FC = () => {
               <AdminEmployeeProfilePage
                 employeeCode={viewingEmployeeCode}
                 originTab={profileOriginTab}
-                onBack={(targetTab) => {
-                  setViewingEmployeeCode(null);
-                  setActiveTab(targetTab || profileOriginTab || 'admin-employees');
-                }}
+                onBack={handleProfileBack}
               />
             )}
           </>

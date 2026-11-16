@@ -22,9 +22,7 @@ class Attendance(Base):
     id = Column(Integer, primary_key=True)
     mark_date = Column(Date, nullable=False)
     check_in = Column(DateTime)
-    check_in_photo = Column(String)
     check_out = Column(DateTime)
-    check_out_photo = Column(String)
     employee_id = Column(Integer,ForeignKey("users.id"),nullable=False)
     check_out_source = Column(String,nullable=True)
     check_out_by = Column(String,nullable=True)
@@ -96,3 +94,15 @@ class CompanySettings(Base):
     attendance_radius_meters = Column(Float,nullable=False,default=100,)
 
     location_verification_enabled = Column(Boolean,nullable=False,default=False,)
+
+
+class UserSession(Base):
+    __tablename__ = "user_sessions"
+
+    id=Column(Integer,primary_key=True)
+    user_id = Column(Integer,ForeignKey("users.id"),nullable=False,index=True)
+    token_hash = Column(String(64),nullable=False,unique=True)
+    created_at = Column(DateTime(timezone=True),nullable=False)
+    expires_at = Column(DateTime(timezone=True),nullable=False)
+    absolute_expires_at = Column(DateTime(timezone=True),nullable=False)
+    revoked_at = Column(DateTime(timezone=True),nullable=True)

@@ -15,9 +15,7 @@ export interface AttendanceRecord {
   id: number;
   mark_date: string;
   check_in: string | null;
-  check_in_photo: string | null;
   check_out: string | null;
-  check_out_photo: string | null;
   employee_id: number;
   employee_name?: string | null;
   employee_code?: string | null;
