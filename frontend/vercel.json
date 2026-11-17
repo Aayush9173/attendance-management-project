@@ -1,5 +1,10 @@
+
 {
   "rewrites": [
+    {
+      "source": "/openapi.json",
+      "destination": "https://attendance-management-project-qka3.onrender.com/openapi.json"
+    },
     {
       "source": "/api/:path*",
       "destination": "https://attendance-management-project-qka3.onrender.com/:path*"
