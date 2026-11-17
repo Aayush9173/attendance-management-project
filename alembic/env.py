@@ -4,7 +4,7 @@ from sqlalchemy import engine_from_config
 from sqlalchemy import pool
 
 from alembic import context
-from app.database import Base
+from app.database import Base, normalize_database_url
 from app import model
 import os
 from dotenv import load_dotenv
@@ -18,11 +18,13 @@ load_dotenv()
 database_url = os.getenv("DATABASE_URL")
 
 if not database_url:
-    raise RuntimeError("DATABASE_URL is not configured in .env")
+    raise RuntimeError("DATABASE_URL environment variable is not configured.")
+
+normalized_database_url = normalize_database_url(database_url)
 
 config.set_main_option(
     "sqlalchemy.url",
-    database_url.replace("%", "%%"),
+    normalized_database_url.replace("%", "%%"),
 )
 
 # Interpret the config file for Python logging.

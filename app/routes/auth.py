@@ -1,22 +1,27 @@
 import hashlib
-import secrets
-from asyncio.windows_events import NULL
-from datetime import datetime,timezone,timedelta
 import os
-from http import cookies
+import secrets
+from datetime import datetime, timezone, timedelta
 from typing import Annotated
+from urllib.parse import urlparse
+
 from dotenv import load_dotenv
-from fastapi import Depends, HTTPException, APIRouter, Cookie, Response
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import jwt, JWTError
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 from starlette import status
-from app.schemas import TokenRequestModel
-from app.dependencies import get_db
-from app.dependencies import crypt_context
-from app.dependencies import clear_refresh_cookie
+
+from app.dependencies import (
+    clear_refresh_cookie,
+    crypt_context,
+    get_db,
+    get_trusted_origins,
+    set_refresh_cookie,
+)
 from app.model import User, UserSession
+from app.schemas import TokenRequestModel
 
 router = APIRouter(
     tags=["auth"],
@@ -27,11 +32,41 @@ load_dotenv()
 
 SECRET_KEY = os.getenv("SECRET_KEY")
 if not SECRET_KEY:
-    raise RuntimeError("Configuration Error!")
+    raise RuntimeError("Configuration Error: SECRET_KEY environment variable is required.")
 
-ALGORITHM = os.getenv("ALGORITHM")
+ALLOWED_ALGORITHMS = ("HS256",)
+ALGORITHM = os.getenv("ALGORITHM", "HS256")
+if ALGORITHM not in ALLOWED_ALGORITHMS:
+    raise RuntimeError(
+        f"Configuration Error: Unsupported ALGORITHM '{ALGORITHM}'. Only {list(ALLOWED_ALGORITHMS)} is permitted."
+    )
 
-db_dependency = Annotated[Session,Depends(get_db)]
+db_dependency = Annotated[Session, Depends(get_db)]
+
+
+def validate_trusted_origin(request: Request) -> None:
+    """Validate Origin or Referer against trusted origins for cookie-bearing endpoints."""
+    origin = request.headers.get("origin")
+    if not origin:
+        referer = request.headers.get("referer")
+        if referer:
+            parsed = urlparse(referer)
+            if parsed.scheme and parsed.netloc:
+                origin = f"{parsed.scheme}://{parsed.netloc}"
+
+    if not origin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="CSRF validation failed: Origin or Referer header is required for this operation",
+        )
+
+    allowed_origins = get_trusted_origins()
+    if origin not in allowed_origins:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="CSRF validation failed: Untrusted request origin",
+        )
+
 
 def authenticate_user(password: str, username: str,db):
     user = db.query(User).filter(func.lower(User.user_name) == username.lower()).first()
@@ -99,21 +134,19 @@ async def login_for_access_token(response: Response,db: db_dependency,form_data:
     db.add(user_session)
     db.commit()
 
-    response.set_cookie(
-        key="refresh_token",
-        value=raw_refresh_token,
-        httponly=True,
-        secure=False,
-        samesite="lax",
-        path="/auth",
-        max_age=7*24*60*60
-    )
+    set_refresh_cookie(response, raw_refresh_token)
     return TokenRequestModel(
         access_token = token,
         token_type = "Bearer")
 
 @router.post("/refresh")
-async def refresh_token(response: Response,db: Session = Depends(get_db), refresh_token: Annotated[str|None,Cookie()]=None):
+async def refresh_token(
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+    refresh_token: Annotated[str | None, Cookie()] = None,
+):
+    validate_trusted_origin(request)
 
     if refresh_token is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
@@ -169,15 +202,7 @@ async def refresh_token(response: Response,db: Session = Depends(get_db), refres
 
     new_access_token = create_token(user.user_name,user.id,user.role,timedelta(seconds=20))
 
-    response.set_cookie(
-        key="refresh_token",
-        value=new_refresh_token,
-        httponly=True,
-        secure=False,
-        samesite="lax",
-        path="/auth",
-        max_age=7 * 24 * 60 * 60
-    )
+    set_refresh_cookie(response, new_refresh_token)
 
     return TokenRequestModel(
         access_token=new_access_token,
@@ -185,7 +210,13 @@ async def refresh_token(response: Response,db: Session = Depends(get_db), refres
     )
 
 @router.post("/logout")
-async def logout(response: Response, refresh_token: Annotated[str|None,Cookie()]=None,db: Session = Depends(get_db)):
+async def logout(
+    request: Request,
+    response: Response,
+    refresh_token: Annotated[str | None, Cookie()] = None,
+    db: Session = Depends(get_db),
+):
+    validate_trusted_origin(request)
     if refresh_token is not None:
 
         token_hash = hashlib.sha256(
