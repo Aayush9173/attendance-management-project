@@ -6,6 +6,14 @@
       "destination": "https://attendance-management-project-qka3.onrender.com/openapi.json"
     },
     {
+      "source": "/api/schedule",
+      "destination": "https://attendance-management-project-qka3.onrender.com/schedule"
+    },
+    {
+      "source": "/api/schedule/:path*",
+      "destination": "https://attendance-management-project-qka3.onrender.com/schedule/:path*"
+    },
+    {
       "source": "/api/:path*",
       "destination": "https://attendance-management-project-qka3.onrender.com/:path*"
     }
