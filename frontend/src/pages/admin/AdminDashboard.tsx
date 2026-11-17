@@ -24,26 +24,65 @@ interface AdminDashboardProps {
 const getTodayIsoDate = () => new Date().toISOString().slice(0, 10);
 
 export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) => {
-  const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>([]);
-  const [exceptionsCount, setExceptionsCount] = useState<number>(0);
-  const [schedulesCount, setSchedulesCount] = useState<number>(0);
+  const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[] | null>(null);
+  const [exceptionsCount, setExceptionsCount] = useState<number | null>(null);
+  const [schedulesCount, setSchedulesCount] = useState<number | null>(null);
+
+  const [attendanceError, setAttendanceError] = useState<string | null>(null);
+  const [exceptionsError, setExceptionsError] = useState<string | null>(null);
+  const [schedulesError, setSchedulesError] = useState<string | null>(null);
+
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const fetchData = useCallback(async () => {
+    setIsLoading(true);
     setError(null);
+    setAttendanceError(null);
+    setExceptionsError(null);
+    setSchedulesError(null);
+
     try {
-      const [attendanceData, exceptionsData, schedulesData] = await Promise.all([
+      const [attendanceResult, exceptionsResult, schedulesResult] = await Promise.allSettled([
         attendanceApi.getAllAttendance(),
         scheduleApi.getExceptions(),
         scheduleApi.getDefaultSchedules(),
       ]);
 
-      setAttendanceRecords(attendanceData);
-      setExceptionsCount(exceptionsData.length);
-      setSchedulesCount(schedulesData.length);
+      const errorParts: string[] = [];
+
+      // 1. Attendance Records
+      if (attendanceResult.status === 'fulfilled') {
+        setAttendanceRecords(attendanceResult.value);
+      } else {
+        const msg = attendanceResult.reason?.message || 'Failed to load attendance logs';
+        setAttendanceError(msg);
+        errorParts.push(`Attendance: ${msg}`);
+      }
+
+      // 2. Schedule Exceptions
+      if (exceptionsResult.status === 'fulfilled') {
+        setExceptionsCount(exceptionsResult.value.length);
+      } else {
+        const msg = exceptionsResult.reason?.message || 'Failed to load schedule exceptions';
+        setExceptionsError(msg);
+        errorParts.push(`Exceptions: ${msg}`);
+      }
+
+      // 3. Default Schedules
+      if (schedulesResult.status === 'fulfilled') {
+        setSchedulesCount(schedulesResult.value.length);
+      } else {
+        const msg = schedulesResult.reason?.message || 'Failed to load default schedules';
+        setSchedulesError(msg);
+        errorParts.push(`Weekly Schedules: ${msg}`);
+      }
+
+      if (errorParts.length > 0) {
+        setError(`Some overview data could not be loaded: ${errorParts.join(' | ')}`);
+      }
     } catch (err: any) {
-      setError(err?.message || 'Failed to load administrative overview data.');
+      setError(err?.message || 'An unexpected error occurred while loading dashboard data.');
     } finally {
       setIsLoading(false);
     }
@@ -55,12 +94,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
 
   // Calculations
   const todayStr = getTodayIsoDate();
-  const todayRecords = attendanceRecords.filter((r) => r.mark_date === todayStr);
-  const missingCheckouts = attendanceRecords.filter((r) => !r.check_out);
-  const completedRecords = attendanceRecords.filter((r) => !!r.check_out);
+  const safeRecords = attendanceRecords ?? [];
+  const todayRecords = safeRecords.filter((r) => r.mark_date === todayStr);
+  const missingCheckouts = safeRecords.filter((r) => !r.check_out);
+  const completedRecords = safeRecords.filter((r) => !!r.check_out);
 
   // Requirement 1: Only the latest 5 attendance records, sorted newest to oldest by date and check-in time
-  const recentRecords = [...attendanceRecords]
+  const recentRecords = [...safeRecords]
     .sort((a, b) => {
       const dateDiff = new Date(b.mark_date).getTime() - new Date(a.mark_date).getTime();
       if (dateDiff !== 0) return dateDiff;
@@ -104,8 +144,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
         <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs flex items-center justify-between">
           <div>
             <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">Total Records</p>
-            <p className="text-2xl font-bold text-slate-900 mt-1">{attendanceRecords.length}</p>
-            <p className="text-2xs text-slate-500 mt-0.5">{completedRecords.length} completed</p>
+            {attendanceError ? (
+              <>
+                <p className="text-sm font-semibold text-rose-500 mt-1">Unavailable</p>
+                <p className="text-2xs text-slate-400 mt-0.5">Failed to load</p>
+              </>
+            ) : (
+              <>
+                <p className="text-2xl font-bold text-slate-900 mt-1">
+                  {attendanceRecords !== null ? attendanceRecords.length : '—'}
+                </p>
+                <p className="text-2xs text-slate-500 mt-0.5">{completedRecords.length} completed</p>
+              </>
+            )}
           </div>
           <div className="w-12 h-12 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center">
             <CalendarCheck2 className="w-6 h-6" />
@@ -116,8 +167,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
         <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs flex items-center justify-between">
           <div>
             <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">Today&apos;s Logs</p>
-            <p className="text-2xl font-bold text-slate-900 mt-1">{todayRecords.length}</p>
-            <p className="text-2xs text-emerald-600 font-semibold mt-0.5">Active today</p>
+            {attendanceError ? (
+              <>
+                <p className="text-sm font-semibold text-rose-500 mt-1">Unavailable</p>
+                <p className="text-2xs text-slate-400 mt-0.5">Failed to load</p>
+              </>
+            ) : (
+              <>
+                <p className="text-2xl font-bold text-slate-900 mt-1">
+                  {attendanceRecords !== null ? todayRecords.length : '—'}
+                </p>
+                <p className="text-2xs text-emerald-600 font-semibold mt-0.5">Active today</p>
+              </>
+            )}
           </div>
           <div className="w-12 h-12 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center">
             <TrendingUp className="w-6 h-6" />
@@ -128,8 +190,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
         <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs flex items-center justify-between">
           <div>
             <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">Missing Checkout</p>
-            <p className="text-2xl font-bold text-amber-600 mt-1">{missingCheckouts.length}</p>
-            <p className="text-2xs text-slate-500 mt-0.5">Requires correction</p>
+            {attendanceError ? (
+              <>
+                <p className="text-sm font-semibold text-rose-500 mt-1">Unavailable</p>
+                <p className="text-2xs text-slate-400 mt-0.5">Failed to load</p>
+              </>
+            ) : (
+              <>
+                <p className="text-2xl font-bold text-amber-600 mt-1">
+                  {attendanceRecords !== null ? missingCheckouts.length : '—'}
+                </p>
+                <p className="text-2xs text-slate-500 mt-0.5">Requires correction</p>
+              </>
+            )}
           </div>
           <div className="w-12 h-12 rounded-xl bg-amber-50 text-amber-600 flex items-center justify-center">
             <AlertTriangle className="w-6 h-6" />
@@ -140,8 +213,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
         <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs flex items-center justify-between">
           <div>
             <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">Active Exceptions</p>
-            <p className="text-2xl font-bold text-slate-900 mt-1">{exceptionsCount}</p>
-            <p className="text-2xs text-slate-500 mt-0.5">{schedulesCount} weekdays defined</p>
+            {exceptionsError ? (
+              <p className="text-sm font-semibold text-rose-500 mt-1">Unavailable</p>
+            ) : (
+              <p className="text-2xl font-bold text-slate-900 mt-1">
+                {exceptionsCount !== null ? exceptionsCount : '—'}
+              </p>
+            )}
+            {schedulesError ? (
+              <p className="text-2xs text-rose-500 mt-0.5">Schedule count unavailable</p>
+            ) : (
+              <p className="text-2xs text-slate-500 mt-0.5">
+                {schedulesCount !== null ? `${schedulesCount} weekdays defined` : '—'}
+              </p>
+            )}
           </div>
           <div className="w-12 h-12 rounded-xl bg-purple-50 text-purple-600 flex items-center justify-center">
             <AlertOctagon className="w-6 h-6" />
@@ -237,7 +322,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
               <Loader2 className="w-6 h-6 animate-spin text-indigo-600" />
               <p className="text-xs">Loading activity stream...</p>
             </div>
-          ) : attendanceRecords.length === 0 ? (
+          ) : attendanceError ? (
+            <div className="py-12 text-center text-xs text-rose-500 flex flex-col items-center justify-center gap-2">
+              <AlertTriangle className="w-6 h-6 text-rose-500" />
+              <p className="font-semibold">Unable to load attendance records</p>
+              <p className="text-slate-400 text-2xs">{attendanceError}</p>
+            </div>
+          ) : safeRecords.length === 0 ? (
             <div className="py-12 text-center text-xs text-slate-400">
               No attendance records logged yet.
             </div>

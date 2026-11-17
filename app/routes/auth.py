@@ -113,7 +113,7 @@ async def login_for_access_token(response: Response,db: db_dependency,form_data:
             detail="Inactive user"
         )
 
-    token = create_token(user.user_name, user.id, user.role, timedelta(seconds=20))
+    token = create_token(user.user_name, user.id, user.role, timedelta(minutes=15))
 
     raw_refresh_token = secrets.token_urlsafe(64)
     refresh_token_hash = hashlib.sha256(raw_refresh_token.encode("utf-8")).hexdigest()
@@ -200,7 +200,7 @@ async def refresh_token(
 
     db.commit()
 
-    new_access_token = create_token(user.user_name,user.id,user.role,timedelta(seconds=20))
+    new_access_token = create_token(user.user_name,user.id,user.role,timedelta(minutes=15))
 
     set_refresh_cookie(response, new_refresh_token)
 

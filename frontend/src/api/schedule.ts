@@ -13,10 +13,10 @@ export interface DeleteExceptionResponse {
 export const scheduleApi = {
   /**
    * Admin: Get default weekly schedules (ordered by weekday)
-   * GET /schedule/
+   * GET /schedule
    */
   async getDefaultSchedules(): Promise<DefaultSchedule[]> {
-    return apiClient<DefaultSchedule[]>('/schedule/', {
+    return apiClient<DefaultSchedule[]>('/schedule', {
       method: 'GET',
     });
   },

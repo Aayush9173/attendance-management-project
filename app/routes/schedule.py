@@ -17,7 +17,8 @@ db_dependency = Annotated[Session, Depends(get_db)]
 user_dependency = Annotated[dict, Depends(verify_token)]
 
 
-@router.get("/")
+@router.get("", response_model=list[DefaultScheduleResponse])
+@router.get("/", response_model=list[DefaultScheduleResponse], include_in_schema=False)
 async def get_schedule(db: db_dependency,user: user_dependency):
     if user.get("UserRole","").casefold() != "admin":
         raise HTTPException(status_code=403,detail="Unauthorized")
