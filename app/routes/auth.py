@@ -83,6 +83,9 @@ def create_token(username: str, user_id: int,role:str,expiration):
     payload.update({"exp": expiration_time})
     return jwt.encode(payload, key=SECRET_KEY, algorithm=ALGORITHM)
 
+oauth_bearer = OAuth2PasswordBearer(tokenUrl="/auth/login")
+
+
 def verify_token(token: Annotated[str,Depends(oauth_bearer)], db: Session = Depends(get_db)):
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
@@ -95,9 +98,6 @@ def verify_token(token: Annotated[str,Depends(oauth_bearer)], db: Session = Depe
         return {"UserName":user_name,"UserId":user_id,"UserRole":user_role,"is_active":user.is_active}
     except JWTError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,detail="Could not validate credentials")
-
-
-oauth_bearer = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
 
 @router.post("/login")

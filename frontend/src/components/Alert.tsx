@@ -36,7 +36,7 @@ export const Alert: React.FC<AlertProps> = ({
       role="alert"
     >
       {icons}
-      <div className="flex-1 leading-relaxed font-medium">{message}</div>
+      <div className="flex-1 min-w-0 break-words leading-relaxed font-medium">{message}</div>
       {onClose && (
         <button
           onClick={onClose}

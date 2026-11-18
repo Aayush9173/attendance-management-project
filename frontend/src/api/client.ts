@@ -1,4 +1,97 @@
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const NETWORK_ERROR_MESSAGE =
+  'Unable to reach the server. Please check your connection and try again.';
+
+function isHtmlPayload(contentType: string, rawText: string): boolean {
+  const normalizedType = contentType.toLowerCase();
+  if (normalizedType.includes('text/html') || normalizedType.includes('application/xhtml+xml')) {
+    return true;
+  }
+  const trimmed = rawText.replace(/^\uFEFF/, '').trimStart().toLowerCase();
+  return trimmed.startsWith('<!doctype html') || trimmed.startsWith('<html');
+}
+
+function getFallbackErrorMessage(status: number, isHtml: boolean, defaultPrefix: string): string {
+  if (status === 502 || status === 503 || status === 504) {
+    return 'The server is temporarily unavailable. Please wait a few seconds and try again.';
+  }
+  if (status === 404 && isHtml) {
+    return 'The requested API endpoint could not be reached. Please try again or contact an administrator.';
+  }
+  if (isHtml) {
+    return `Unexpected server response (HTTP ${status}). Please try again.`;
+  }
+  return `${defaultPrefix} ${status}`;
+}
+
+async function parseResponseBody(
+  response: Response,
+  defaultErrorPrefix: string
+): Promise<unknown> {
+  if (response.status === 204 || response.status === 205) {
+    return null;
+  }
+
+  const contentType = response.headers.get('content-type') || '';
+  const rawText = await response.text();
+  const trimmedText = rawText.trim();
+  const htmlDetected = isHtmlPayload(contentType, rawText);
+  const expectsJson = contentType.toLowerCase().includes('application/json');
+
+  let responseData: any = null;
+  let jsonParseFailed = false;
+
+  if (trimmedText.length > 0 && !htmlDetected) {
+    if (expectsJson) {
+      try {
+        responseData = JSON.parse(rawText);
+      } catch {
+        jsonParseFailed = true;
+      }
+    } else {
+      responseData = rawText;
+    }
+  }
+
+  if (!response.ok) {
+    let errorMessage = getFallbackErrorMessage(response.status, htmlDetected, defaultErrorPrefix);
+    const isGatewayError =
+      response.status === 502 || response.status === 503 || response.status === 504;
+
+    if (!htmlDetected && !jsonParseFailed && responseData) {
+      if (typeof responseData === 'object' && responseData.detail) {
+        if (typeof responseData.detail === 'string') {
+          errorMessage = responseData.detail;
+        } else if (Array.isArray(responseData.detail)) {
+          // FastAPI validation errors
+          errorMessage = responseData.detail
+            .map((d: any) => `${d.loc ? d.loc.join('.') : 'field'}: ${d.msg}`)
+            .join('; ');
+        }
+      } else if (!isGatewayError && typeof responseData === 'string' && responseData.length > 0) {
+        errorMessage = responseData;
+      }
+    }
+
+    throw new ApiError(errorMessage, response.status, htmlDetected ? null : responseData);
+  }
+
+  if (htmlDetected) {
+    throw new ApiError(
+      'Received an unexpected HTML response from the server instead of API data. Please try again.',
+      response.status
+    );
+  }
+
+  if (jsonParseFailed) {
+    throw new ApiError(
+      'Received an invalid response from the server. Please try again.',
+      response.status
+    );
+  }
+
+  return responseData;
+}
 
 let inMemoryToken: string | null = null;
 let sessionGeneration = 0;
@@ -118,11 +211,7 @@ export async function apiClient<T>(endpoint: string, options: RequestOptions = {
       headers: requestHeaders,
     });
   } catch (err) {
-    throw new ApiError(
-      'Unable to connect to the backend server. Please verify the FastAPI service is running on port 8000.',
-      0,
-      err
-    );
+    throw new ApiError(NETWORK_ERROR_MESSAGE, 0, err);
   }
 
   // Handle 401 Unauthorized - token expired or invalid
@@ -161,37 +250,7 @@ export async function apiClient<T>(endpoint: string, options: RequestOptions = {
     }
   }
 
-  // Parse response body
-  const contentType = response.headers.get('content-type') || '';
-  let responseData: any = null;
-
-  if (contentType.includes('application/json')) {
-    responseData = await response.json();
-  } else {
-    responseData = await response.text();
-  }
-
-  if (!response.ok) {
-    let errorMessage = `Request failed with status ${response.status}`;
-
-    if (responseData) {
-      if (typeof responseData === 'object' && responseData.detail) {
-        if (typeof responseData.detail === 'string') {
-          errorMessage = responseData.detail;
-        } else if (Array.isArray(responseData.detail)) {
-          // FastAPI validation errors
-          errorMessage = responseData.detail
-            .map((d: any) => `${d.loc ? d.loc.join('.') : 'field'}: ${d.msg}`)
-            .join('; ');
-        }
-      } else if (typeof responseData === 'string' && responseData.length > 0) {
-        errorMessage = responseData;
-      }
-    }
-
-    throw new ApiError(errorMessage, response.status, responseData);
-  }
-
+  const responseData = await parseResponseBody(response, 'Request failed with status');
   return responseData as T;
 }
 
@@ -209,41 +268,9 @@ export async function rawRefreshToken(): Promise<{ access_token: string; token_t
       credentials: 'include',
     });
   } catch (err) {
-    throw new ApiError(
-      'Unable to connect to the backend server. Please verify the FastAPI service is running on port 8000.',
-      0,
-      err
-    );
+    throw new ApiError(NETWORK_ERROR_MESSAGE, 0, err);
   }
 
-  const contentType = response.headers.get('content-type') || '';
-  let responseData: any = null;
-
-  if (contentType.includes('application/json')) {
-    responseData = await response.json();
-  } else {
-    responseData = await response.text();
-  }
-
-  if (!response.ok) {
-    let errorMessage = `Refresh failed with status ${response.status}`;
-
-    if (responseData) {
-      if (typeof responseData === 'object' && responseData.detail) {
-        if (typeof responseData.detail === 'string') {
-          errorMessage = responseData.detail;
-        } else if (Array.isArray(responseData.detail)) {
-          errorMessage = responseData.detail
-            .map((d: any) => `${d.loc ? d.loc.join('.') : 'field'}: ${d.msg}`)
-            .join('; ');
-        }
-      } else if (typeof responseData === 'string' && responseData.length > 0) {
-        errorMessage = responseData;
-      }
-    }
-
-    throw new ApiError(errorMessage, response.status, responseData);
-  }
-
+  const responseData = await parseResponseBody(response, 'Refresh failed with status');
   return responseData as { access_token: string; token_type: string };
 }
